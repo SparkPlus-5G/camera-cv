@@ -4,7 +4,7 @@ The core sparse representation for agent integration.
 """
 
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from config import (
@@ -13,20 +13,15 @@ from config import (
 )
 from motion.motion_field import MotionFieldState
 from representation.motion_parallax import MotionParallaxEstimator, RelativeDepthMap
+from representation.depth_layers import DepthLayerAnalyzer, LayerCoherenceResult
 
 
 @dataclass
 class SparseMotionCloud:
     """
-    Motion-induced point-cloud-like representation.
+    Enhanced motion-induced point-cloud-like representation.
     
-    NOT true 3D. This is a relative motion characterization per spatial cell
-    designed for agent-based reasoning about scene-level coherence.
-    
-    Key properties:
-    - Sparse: 8x6 = 48 cells, not per-pixel
-    - Relative: No absolute depth, only motion-based ordering
-    - Coherence-focused: Designed to answer "is motion correlated across space?"
+    Includes multi-frame depth accumulation and layer analysis.
     """
     # Grid dimensions
     grid_cols: int
@@ -36,7 +31,7 @@ class SparseMotionCloud:
     motion_magnitude: np.ndarray      # Average motion per cell (rows x cols)
     motion_direction: np.ndarray      # Dominant direction per cell (radians)
     direction_variance: np.ndarray    # Direction spread per cell (low = coherent)
-    relative_depth_order: np.ndarray  # Depth proxy (0=far, 1=near)
+    relative_depth_order: np.ndarray  # Accumulated depth (0=far, 1=near)
     temporal_consistency: np.ndarray  # Stability over time (0=unstable, 1=stable)
     
     # Boolean masks
@@ -48,18 +43,27 @@ class SparseMotionCloud:
     motion_intensity: float           # 0-1: normalized motion level
     active_cell_ratio: float          # Fraction of cells with motion
     coherent_cell_ratio: float        # Fraction of cells that are coherent
+    
+    # Enhanced: Depth layer analysis
+    depth_layers: Optional[np.ndarray] = None  # Per-cell layer (0=far, 1=mid, 2=near)
+    depth_stability: Optional[np.ndarray] = None  # Per-cell depth stability
+    layer_coherence: Optional[LayerCoherenceResult] = None  # Layer analysis result
+    depth_anomaly_detected: bool = False  # Quick flag for depth anomaly
 
 
 class SpatialCoherenceAnalyzer:
     """
     Generates sparse motion cloud and computes coherence metrics.
     
-    This is the primary output generator for the agent interface.
+    Enhanced with multi-frame depth accumulation and layer analysis.
     """
     
-    def __init__(self, grid_size: tuple = COHERENCE_GRID):
+    def __init__(self, grid_size: tuple = COHERENCE_GRID, enable_layer_analysis: bool = True):
         self.grid_size = grid_size
+        self.enable_layer_analysis = enable_layer_analysis
+        
         self._parallax = MotionParallaxEstimator(grid_size)
+        self._layer_analyzer = DepthLayerAnalyzer(grid_size) if enable_layer_analysis else None
         
         # History for temporal analysis
         self._direction_history: list = []
@@ -119,6 +123,34 @@ class SpatialCoherenceAnalyzer:
         active_cell_ratio = np.sum(active_cells) / total_cells
         coherent_cell_ratio = np.sum(coherent_cells) / total_cells
         
+        # Enhanced: Depth layer analysis
+        depth_layers = None
+        depth_stability = None
+        layer_coherence = None
+        depth_anomaly_detected = False
+        
+        if self.enable_layer_analysis and self._layer_analyzer is not None:
+            # Get layer grid from the enhanced parallax estimator
+            if depth_map.layer_grid is not None:
+                depth_layers = depth_map.layer_grid
+            else:
+                # Compute layers from depth grid
+                depth_layers = np.floor(depth_map.depth_grid * 3).astype(np.int32)
+                depth_layers = np.clip(depth_layers, 0, 2)
+            
+            # Get stability from parallax estimator
+            if depth_map.stability_grid is not None:
+                depth_stability = depth_map.stability_grid
+            
+            # Run layer coherence analysis
+            layer_coherence = self._layer_analyzer.analyze(
+                depth_layers,
+                motion_field.magnitude_grid,
+                motion_field.direction_grid,
+                active_cells
+            )
+            depth_anomaly_detected = layer_coherence.depth_anomaly_detected
+        
         return SparseMotionCloud(
             grid_cols=cols,
             grid_rows=rows,
@@ -132,7 +164,12 @@ class SpatialCoherenceAnalyzer:
             scene_coherence_score=scene_coherence,
             motion_intensity=motion_intensity,
             active_cell_ratio=active_cell_ratio,
-            coherent_cell_ratio=coherent_cell_ratio
+            coherent_cell_ratio=coherent_cell_ratio,
+            # Enhanced fields
+            depth_layers=depth_layers,
+            depth_stability=depth_stability,
+            layer_coherence=layer_coherence,
+            depth_anomaly_detected=depth_anomaly_detected
         )
     
     def _compute_scene_coherence(self, 

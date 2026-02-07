@@ -88,10 +88,30 @@ class FrameCapture:
         self._frame_lock = threading.Lock()
     
     def open(self) -> bool:
-        """Open the camera connection."""
-        self._cap = cv2.VideoCapture(self.camera_id)
+        """
+        Open the camera connection.
+        
+        Tries V4L2 backend first (better for Raspberry Pi),
+        then falls back to default backend.
+        """
+        # Try V4L2 backend first (works better on Linux/RPi)
+        self._cap = cv2.VideoCapture(self.camera_id, cv2.CAP_V4L2)
         
         if not self._cap.isOpened():
+            # Fallback to default backend (GStreamer, etc.)
+            self._cap = cv2.VideoCapture(self.camera_id)
+        
+        if not self._cap.isOpened():
+            # Last resort: try different camera indices
+            for alt_id in [0, 1, 2]:
+                if alt_id != self.camera_id:
+                    self._cap = cv2.VideoCapture(alt_id, cv2.CAP_V4L2)
+                    if self._cap.isOpened():
+                        print(f"Camera found at index {alt_id}")
+                        break
+        
+        if not self._cap.isOpened():
+            print("ERROR: Could not open any camera")
             return False
         
         # Configure camera
@@ -99,8 +119,17 @@ class FrameCapture:
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self._cap.set(cv2.CAP_PROP_FPS, self.fps)
         
+        # Set MJPEG format for better USB camera performance
+        self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        
         # Disable auto-focus if available (reduces latency)
         self._cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        
+        # Read a test frame to confirm camera is working
+        ret, _ = self._cap.read()
+        if not ret:
+            print("WARNING: Camera opened but could not read frame")
+            return False
         
         return True
     
