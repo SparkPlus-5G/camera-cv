@@ -1,0 +1,3 @@
+# Core dependencies - minimal for Pi 5B
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
